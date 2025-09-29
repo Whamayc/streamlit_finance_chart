@@ -1,82 +1,113 @@
 import pandas as pd
 import streamlit as st
-import yfinance
+import yfinance as yf
+import requests
+from io import StringIO
 
-@st.cache
-def load_data():
-    components = pd.read_html('https://en.wikipedia.org/wiki/List_of_S'
-                    '%26P_500_companies')[0]
-    return components.drop('SEC filings', axis=1).set_index('Symbol')
+SP500_URL = 'https://en.wikipedia.org/wiki/List_of_S%26P_500_companies'
 
 
-@st.cache(ignore_hash=True)
-def load_quotes(asset):
-    return yfinance.download(asset)
+# Cache static data (Wikipedia components list)
+@st.cache_data
+def load_sp500_components():
+    url = SP500_URL
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"
+    }
+    response = requests.get(url, headers=headers)
+    html_data = StringIO(response.text)
+    components = pd.read_html(html_data)[0]
+    components.set_index('Symbol', inplace=True)
+    return components
+
+
+# Cache API calls for quotes
+@st.cache_data
+def load_quotes(symbol):
+    data = yf.download(symbol, period='max', auto_adjust=False)
+    # Properly handle MultiIndex columns
+    if isinstance(data.columns, pd.MultiIndex):
+        data.columns = data.columns.get_level_values(0)
+    return data
+
+
+def format_symbol_label(symbol, components):
+    company = components.loc[symbol]
+    return f"{symbol} - {company.Security}"
 
 
 def main():
-    components = load_data()
-    title = st.empty()
+    # Sets the page title and expands layout.
+    st.set_page_config(page_title="S&P 500 Finance Dashboard", layout="wide")
+
+    # Loads the S&P 500 company list and sets up sidebar.
+    components = load_sp500_components()
     st.sidebar.title("Options")
 
-    def label(symbol):
-        a = components.loc[symbol]
-        return symbol + ' - ' + a.Security
+    # Optional: View entire list
+    if st.sidebar.checkbox('View Companies List'):
+        st.dataframe(
+            components[['Security', 'GICS Sector', 'Date added', 'Founded']])
 
-    if st.sidebar.checkbox('View companies list'):
-        st.dataframe(components[['Security',
-                                 'GICS Sector',
-                                 'Date first added',
-                                 'Founded']])
+    # Asset selection
+    st.sidebar.subheader("Select Asset")
+    asset = st.sidebar.selectbox(
+        'Choose an asset',
+        components.index.sort_values(),
+        index=1,
+        format_func=lambda x: format_symbol_label(x, components)
+    )
 
-    st.sidebar.subheader('Select asset')
-    asset = st.sidebar.selectbox('Click below to select a new asset',
-                                 components.index.sort_values(), index=3,
-                                 format_func=label)
-    title.title(components.loc[asset].Security)
-    if st.sidebar.checkbox('View company info', True):
-        st.table(components.loc[asset])
-    data0 = load_quotes(asset)
-    data = data0.copy().dropna()
+    company_info = components.loc[asset]
+
+    if st.sidebar.checkbox("View Company Info", True):
+        st.title(company_info.Security)
+        st.table(company_info.to_frame().T)
+
+    st.title(company_info.Security)
+
+    # Load quotes
+    data = load_quotes(asset).dropna()
     data.index.name = None
 
-    section = st.sidebar.slider('Number of quotes', min_value=30,
-                        max_value=min([2000, data.shape[0]]),
-                        value=500,  step=10)
+    # Quote selection range
+    section = st.sidebar.slider(
+        'Number of Quotes', 30, min(2000, len(data)), 500, 10)
+    data_view = data[-section:][['Adj Close']].copy()
 
-    data2 = data[-section:]['Adj Close'].to_frame('Adj Close')
+    # SMA options
+    if st.sidebar.checkbox("SMA"):
+        period = st.sidebar.slider("SMA Period", 5, 500, 20)
+        data_view[f"SMA {period}"] = data['Adj Close'].rolling(
+            period).mean().reindex(data_view.index)
 
-    sma = st.sidebar.checkbox('SMA')
-    if sma:
-        period= st.sidebar.slider('SMA period', min_value=5, max_value=500,
-                             value=20,  step=1)
-        data[f'SMA {period}'] = data['Adj Close'].rolling(period ).mean()
-        data2[f'SMA {period}'] = data[f'SMA {period}'].reindex(data2.index)
+    if st.sidebar.checkbox("SMA 2"):
+        period2 = st.sidebar.slider("SMA 2 Period", 5, 500, 100)
+        data_view[f"SMA2 {period2}"] = data['Adj Close'].rolling(
+            period2).mean().reindex(data_view.index)
 
-    sma2 = st.sidebar.checkbox('SMA2')
-    if sma2:
-        period2= st.sidebar.slider('SMA2 period', min_value=5, max_value=500,
-                             value=100,  step=1)
-        data[f'SMA2 {period2}'] = data['Adj Close'].rolling(period2).mean()
-        data2[f'SMA2 {period2}'] = data[f'SMA2 {period2}'].reindex(data2.index)
+    # Chart
+    st.subheader("Chart")
+    st.line_chart(data_view)
 
-    st.subheader('Chart')
-    st.line_chart(data2)
+    # Statistics
+    if st.sidebar.checkbox("View Statistics"):
+        st.subheader("Statistics")
+        st.table(data_view.describe())
 
-    if st.sidebar.checkbox('View stadistic'):
-        st.subheader('Stadistic')
-        st.table(data2.describe())
+    # Full Quotes
+    if st.sidebar.checkbox("View Quotes"):
+        st.subheader(f"{asset} Historical Data")
+        st.write(data_view)
 
-    if st.sidebar.checkbox('View quotes'):
-        st.subheader(f'{asset} historical data')
-        st.write(data2)
-
+    # About section
     st.sidebar.title("About")
-    st.sidebar.info('This app is a simple example of '
-                    'using Strealit to create a financial data web app.\n'
-                    '\nIt is maintained by [Paduel]('
-                    'https://twitter.com/paduel_py).\n\n'
-                    'Check the code at https://github.com/paduel/streamlit_finance_chart')
+    st.sidebar.info(
+        "This app is a simple example of using Streamlit to create a financial "
+        "data web app.\n\nMaintained by [Paduel](https://twitter.com/paduel_py).\n\n"
+        "Source: https://github.com/paduel/streamlit_finance_chart"
+    )
 
-if __name__ == '__main__':
+
+if __name__ == "__main__":
     main()
